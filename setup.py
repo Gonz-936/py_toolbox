@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="py_toolbox",
-    version="0.2.0", 
+    version="0.3.0", # <-- Incrementamos la versión
     description="Una colección de herramientas reutilizables para automatizaciones en Python.",
     author="Gonzalo Hormazabal", 
     package_dir={"": "src"},
@@ -13,7 +13,8 @@ setup(
         "google-api-python-client",
         "google-auth-httplib2",
         "google-auth-oauthlib",
-        "tika",  # <-- Dependencia añadida
+        "tika",
+        "beautifulsoup4", # <-- Dependencia añadida para el nuevo HtmlParser
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
