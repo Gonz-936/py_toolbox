@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="py_toolbox",
-    version="0.3.0", # <-- Incrementamos la versión
+    version="0.4.0", # <-- Incrementamos la versión a 0.4.0 por la nueva funcionalidad de Textract
     description="Una colección de herramientas reutilizables para automatizaciones en Python.",
     author="Gonzalo Hormazabal", 
     package_dir={"": "src"},
@@ -14,7 +14,7 @@ setup(
         "google-auth-httplib2",
         "google-auth-oauthlib",
         "tika",
-        "beautifulsoup4", # <-- Dependencia añadida para el nuevo HtmlParser
+        "beautifulsoup4",
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
