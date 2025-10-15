@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="py_toolbox",
-    version="0.4.0", # <-- Incrementamos la versión a 0.4.0 por la nueva funcionalidad de Textract
+    version="0.5.0", 
     description="Una colección de herramientas reutilizables para automatizaciones en Python.",
     author="Gonzalo Hormazabal", 
     package_dir={"": "src"},
