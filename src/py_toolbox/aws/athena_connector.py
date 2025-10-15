@@ -1,122 +1,115 @@
-# src/invoice_pipeline/athena_connector.py
-import logging
-import time
-import boto3
-from botocore.exceptions import ClientError
+import sys
+import pandas as pd
+from awsglue.utils import getResolvedOptions
+from datetime import datetime
 
-class AthenaConnector:
-    def __init__(self, database_name: str, bucket_name: str, region_name: str):
-        """
-        Inicializa el conector de Athena.
-        :param database_name: El nombre de la base de datos en Athena.
-        :param bucket_name: El bucket de S3 donde Athena guardará los resultados de las consultas.
-        :param region_name: La región de AWS.
-        """
-        self.athena_client = boto3.client('athena', region_name=region_name)
-        self.database = database_name
-        self.s3_output_location = f's3://{bucket_name}/athena_query_results/'
-        logging.info("AthenaConnector inicializado.")
+# ==============================================================================
+# 1. IMPORTACIONES DESDE LA LIBRERÍA CENTRAL 'py_toolbox'
+# ==============================================================================
+try:
+    from py_toolbox.aws.athena_connector import AthenaConnector
+    from py_toolbox.aws.s3_uploader import S3Uploader
+    print("INFO: Módulos de py_toolbox (AthenaConnector, S3Uploader) importados exitosamente.")
+except ImportError as e:
+    print(f"ERROR CRÍTICO: No se pudieron importar los módulos de py_toolbox. Error: {e}")
+    sys.exit(1)
 
-    def get_processed_file_ids(self, table_name: str) -> set[str]:
-        """
-        Consulta la tabla de facturas en Athena para obtener todos los file_id únicos
-        que ya han sido procesados. Si ocurre un error de permisos, el job fallará.
-        """
-        query = f'SELECT DISTINCT file_id FROM "{table_name}" WHERE file_id IS NOT NULL;'
-        logging.info(f"Ejecutando consulta en Athena para obtener IDs procesados: {query}")
+# ==============================================================================
+# 2. CONSTANTES Y CONFIGURACIÓN DEL JOB
+# ==============================================================================
+# Las constantes de configuración se eliminan. Ahora se leerán desde los argumentos del job.
 
-        try:
-            response = self.athena_client.start_query_execution(
-                QueryString=query,
-                QueryExecutionContext={'Database': self.database},
-                ResultConfiguration={'OutputLocation': self.s3_output_location}
-            )
-            query_execution_id = response['QueryExecutionId']
-            logging.info(f"Consulta iniciada con ID: {query_execution_id}")
+FINAL_COLUMNS = [
+    'DOCUMENT TYPE', 'INVOICE NUMBER', 'CURRENCY', 'BILLING CYCLE DATE',
+    'INVOICE ICA', 'ACTIVITY ICA', 'BILLABLE ICA', 'COLLECTION METHOD',
+    'SERVICE CODE', 'SERVICE CODE DESCRIPTION', 'EVENT ID', 'EVENT DESCRIPTION',
+    'AFFILIATE', 'UOM', 'QUANTITY AMOUNT', 'RATE', 'CHARGE', 'TAX CHARGE',
+    'TOTAL CHARGE', 'FEE TYPE', 'CATEGORY', 'SUBCATEGORY', 'GDRIVE_FILE_ID'
+]
+COLUMNS_WITH_DEFAULTS = {
+    'FEE TYPE': 'Not Available',
+    'CATEGORY': 'Not Available',
+    'SUBCATEGORY': 'Not Available',
+    'GDRIVE_FILE_ID': 'Not Available'
+}
 
-            while True:
-                stats = self.athena_client.get_query_execution(QueryExecutionId=query_execution_id)
-                status = stats['QueryExecution']['Status']['State']
-                if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
-                    break
-                time.sleep(1)
+# ==============================================================================
+# 3. LÓGICA DE ORQUESTACIÓN DEL JOB
+# ==============================================================================
+def main():
+    # --- Obtención de Parámetros ---
+    # AÑADIMOS LOS NUEVOS PARÁMETROS DE CONFIGURACIÓN AQUÍ
+    args = getResolvedOptions(sys.argv, [
+        'S3_INPUT_BUCKET',
+        'S3_INPUT_KEY',
+        'S3_OUTPUT_PATH',
+        'ATHENA_DATABASE',
+        'ATHENA_TABLE',
+        'AWS_REGION',
+        'ATHENA_OUTPUT_LOCATION'
+    ])
+    
+    s3_input_bucket = args['S3_INPUT_BUCKET']
+    s3_input_key = args['S3_INPUT_KEY']
+    s3_output_path = args['S3_OUTPUT_PATH']
+    athena_database = args['ATHENA_DATABASE']
+    athena_table = args['ATHENA_TABLE']
+    aws_region = args['AWS_REGION']
+    athena_output_location = args['ATHENA_OUTPUT_LOCATION']
+    
+    # --- Inicialización de Conectores de py_toolbox con los parámetros recibidos ---
+    s3_uploader = S3Uploader(region_name=aws_region)
+    athena_connector = AthenaConnector(database=athena_database, s3_output_location=athena_output_location, region_name=aws_region)
 
-            if status != 'SUCCEEDED':
-                error_info = stats['QueryExecution']['Status'].get('StateChangeReason', 'Error desconocido.')
-                logging.error(f"La consulta de Athena falló con estado: {status}. Razón: {error_info}")
-                # Si la consulta falla en Athena, devolvemos un set vacío para no detener el pipeline
-                # por un error transitorio.
-                return set()
+    
+    gdrive_file_id = s3_uploader.get_object_metadata(s3_input_bucket, s3_input_key, 'gdrive_file_id', COLUMNS_WITH_DEFAULTS['GDRIVE_FILE_ID'])
+    source_uri = f"s3://{s3_input_bucket}/{s3_input_key}"
+    print(f"INFO: Iniciando procesamiento para archivo: {source_uri} (GDrive ID: {gdrive_file_id})")
 
-            results_paginator = self.athena_client.get_paginator('get_query_results')
-            results_iter = results_paginator.paginate(QueryExecutionId=query_execution_id)
-            
-            processed_ids = set()
-            for results in results_iter:
-                for row in results['ResultSet']['Rows'][1:]:
-                    if 'Data' in row and row['Data'][0].get('VarCharValue'):
-                        processed_ids.add(row['Data'][0]['VarCharValue'])
-            
-            logging.info(f"Se encontraron {len(processed_ids)} file_ids ya procesados en Athena.")
-            return processed_ids
+    try:
+        df = pd.read_csv(source_uri)
+        df.columns = df.columns.str.strip()
+        for col, default_value in COLUMNS_WITH_DEFAULTS.items():
+            if col not in df.columns:
+                df[col] = default_value
+        df['GDRIVE_FILE_ID'] = gdrive_file_id
+        df_final = df.reindex(columns=FINAL_COLUMNS)
+    except Exception as e:
+        print(f"ERROR: Fallo en la lectura o transformación del CSV. Moviendo a skipped/. Error: {e}")
+        s3_uploader.move_file(s3_input_bucket, s3_input_key, 'invoices/skipped/')
+        raise e
 
-        except ClientError as e:
-            # --- LÓGICA DE FALLO EXPLÍCITO ---
-            # Manejamos el caso específico de que la tabla no exista como un escenario normal.
-            if e.response['Error']['Code'] == 'InvalidRequestException' and 'does not exist' in e.response['Error']['Message']:
-                logging.warning(f"La tabla '{table_name}' no existe aún. Se asume que no hay archivos procesados.")
-                return set()
-            else:
-                # Para cualquier otro error de cliente (incluido AccessDenied), relanzamos la excepción.
-                logging.error(f"Error de cliente no manejado al consultar Athena por file_ids: {e}")
-                raise e
+    invoice_number = df_final['INVOICE NUMBER'].iloc[0]
+    print(f"INFO: Verificando duplicados para INVOICE_NUMBER: {invoice_number}")
 
-    def get_processed_invoice_numbers(self, table_name: str) -> set[int]:
-        """
-        Consulta la tabla de facturas en Athena para obtener todos los invoice_number únicos
-        que ya han sido procesados. Si ocurre un error de permisos, el job fallará.
-        """
-        query = f'SELECT DISTINCT invoice_number FROM "{table_name}" WHERE invoice_number IS NOT NULL;'
-        logging.info(f"Ejecutando consulta en Athena para obtener N° de facturas procesadas: {query}")
+    athena_query = f"""SELECT COUNT(*) AS count FROM "{athena_table}" WHERE "invoice number" = '{invoice_number}'"""
+    
+    try:
+        query_results_df = athena_connector.get_query_results(athena_query)
+        if not query_results_df.empty and query_results_df['count'].iloc[0] > 0:
+            print(f"ADVERTENCIA: Factura '{invoice_number}' ya procesada.")
+            s3_uploader.move_file(s3_input_bucket, s3_input_key, 'invoices/skipped/')
+            return
+    except Exception as e:
+        print(f"ERROR: Falló la verificación de duplicados en Athena. Moviendo a skipped/. Error: {e}")
+        s3_uploader.move_file(s3_input_bucket, s3_input_key, 'invoices/skipped/')
+        raise e
+        
+    try:
+        date_obj = pd.to_datetime(df_final['BILLING CYCLE DATE'].iloc[0], errors='coerce', infer_datetime_format=True)
+        if pd.isna(date_obj):
+             date_obj = datetime.utcnow()
+        partition_path = f"year={date_obj.year}/month={date_obj.month:02d}/day={date_obj.day:02d}"
+        
+        output_key = f"{s3_output_path.replace(f's3://{s3_input_bucket}/', '')}/{partition_path}/{s3_input_key.split('/')[-1].replace('.csv', '.parquet')}"
+        
+        print(f"INFO: Escribiendo archivo Parquet en: s3://{s3_input_bucket}/{output_key}")
+        s3_uploader.upload_dataframe_as_parquet(df_final, s3_input_bucket, output_key)
+        
+        s3_uploader.delete_file(s3_input_bucket, s3_input_key)
+    except Exception as e:
+        print(f"ERROR: No se pudo escribir el archivo Parquet en S3. Error: {e}")
+        raise e
 
-        try:
-            response = self.athena_client.start_query_execution(
-                QueryString=query,
-                QueryExecutionContext={'Database': self.database},
-                ResultConfiguration={'OutputLocation': self.s3_output_location}
-            )
-            query_execution_id = response['QueryExecutionId']
-            logging.info(f"Consulta de N° de Facturas iniciada con ID: {query_execution_id}")
-
-            while True:
-                stats = self.athena_client.get_query_execution(QueryExecutionId=query_execution_id)
-                status = stats['QueryExecution']['Status']['State']
-                if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
-                    break
-                time.sleep(1)
-
-            if status != 'SUCCEEDED':
-                error_info = stats['QueryExecution']['Status'].get('StateChangeReason', 'Error desconocido.')
-                logging.error(f"La consulta de Athena para N° de Facturas falló: {status}. Razón: {error_info}")
-                return set()
-
-            results_paginator = self.athena_client.get_paginator('get_query_results')
-            results_iter = results_paginator.paginate(QueryExecutionId=query_execution_id)
-            
-            processed_numbers = set()
-            for results in results_iter:
-                for row in results['ResultSet']['Rows'][1:]:
-                    if 'Data' in row and row['Data'][0].get('VarCharValue'):
-                        processed_numbers.add(int(row['Data'][0]['VarCharValue']))
-            
-            logging.info(f"Se encontraron {len(processed_numbers)} invoice_numbers ya procesados en Athena.")
-            return processed_numbers
-
-        except ClientError as e:
-            # --- LÓGICA DE FALLO EXPLÍCITO ---
-            if e.response['Error']['Code'] == 'InvalidRequestException' and 'does not exist' in e.response['Error']['Message']:
-                logging.warning(f"La tabla '{table_name}' no existe aún. Se asume que no hay facturas procesadas.")
-                return set()
-            else:
-                logging.error(f"Error de cliente no manejado al consultar Athena por invoice_numbers: {e}")
-                raise e
+if __name__ == "__main__":
+    main()

@@ -37,3 +37,71 @@ class S3Uploader:
         except Exception as e:
             logging.error(f"Un error inesperado ocurrió durante la subida a S3: {e}")
             return False
+    # Dentro de la clase S3Uploader en s3_uploader.py
+
+    def get_object_metadata(self, bucket, key, metadata_key, default=None):
+        """Obtiene un valor de metadato específico de un objeto S3."""
+        try:
+            head_object = self.s3_client.head_object(Bucket=bucket, Key=key)
+            return head_object.get('Metadata', {}).get(metadata_key, default)
+        except self.s3_client.exceptions.NoSuchKey:
+            print(f"Advertencia: El objeto s3://{bucket}/{key} no fue encontrado para obtener metadata.")
+            return default
+        except Exception as e:
+            print(f"Error al obtener metadata para s3://{bucket}/{key}: {e}")
+            return default
+
+    def move_file(self, bucket, source_key, dest_prefix):
+        """Mueve un archivo a una nueva ubicación (prefijo) dentro del mismo bucket."""
+        try:
+            file_name = source_key.split('/')[-1]
+            dest_key = f"{dest_prefix.strip('/')}/{file_name}"
+            copy_source = {'Bucket': bucket, 'Key': source_key}
+            
+            print(f"INFO: Moviendo de s3://{bucket}/{source_key} a s3://{bucket}/{dest_key}")
+            self.s3_client.copy_object(CopySource=copy_source, Bucket=bucket, Key=dest_key)
+            self.s3_client.delete_object(Bucket=bucket, Key=source_key)
+            print("INFO: Movimiento completado.")
+        except Exception as e:
+            print(f"ERROR: Fallo al mover archivo {source_key}: {e}")
+            raise e
+
+    def delete_file(self, bucket, key):
+        """Elimina un archivo de S3."""
+        try:
+            self.s3_client.delete_object(Bucket=bucket, Key=key)
+            print(f"INFO: Archivo s3://{bucket}/{key} eliminado.")
+        except Exception as e:
+            print(f"ERROR: Fallo al eliminar archivo {key}: {e}")
+            raise e
+    def upload_dataframe_as_parquet(self, df, bucket, key, index=False):
+        """
+        Convierte un DataFrame de Pandas a formato Parquet en memoria y lo sube a S3.
+
+        :param df: El DataFrame de Pandas a subir.
+        :param bucket: El nombre del bucket de S3 de destino.
+        :param key: La ruta completa (prefijo + nombre de archivo) del objeto en S3.
+        :param index: Booleano, si se debe incluir el índice del DataFrame en el archivo.
+        """
+        try:
+            # Crear un buffer de bytes en memoria
+            out_buffer = io.BytesIO()
+            
+            # Escribir el DataFrame como Parquet en el buffer
+            # Se requiere la librería 'pyarrow'
+            df.to_parquet(out_buffer, index=index, engine='pyarrow')
+            
+            # Mover el cursor del buffer al principio
+            out_buffer.seek(0)
+            
+            # Subir el contenido del buffer a S3 como si fuera un archivo
+            self.s3_client.put_object(Bucket=bucket, Key=key, Body=out_buffer.read())
+            
+            print(f"INFO: DataFrame subido exitosamente a s3://{bucket}/{key}")
+            
+        except ImportError:
+            print("ERROR CRÍTICO: La librería 'pyarrow' es necesaria para escribir en formato Parquet. Por favor, instálala.")
+            raise
+        except Exception as e:
+            print(f"ERROR: Fallo al subir el DataFrame como Parquet a s3://{bucket}/{key}. Error: {e}")
+            raise
