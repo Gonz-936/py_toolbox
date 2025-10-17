@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="py_toolbox",
-    version="0.7.1",  # <-- Versión incrementada
+    version="0.7.2",  # <-- Versión incrementada
     description="Una colección de herramientas reutilizables para automatizaciones en Python.",
     author="Gonzalo Hormazabal", 
     package_dir={"": "src"},
